@@ -1,0 +1,6 @@
+.terraform
+.terraform.lock.hcl
+terraform.tfstate.backup
+terraform.tfstate
+ansible/inventory
+ansible/cluster_join_command

@@ -1,0 +1,4 @@
+user_name : your_user_name
+user_password : "your_hashed_password"
+domain_name : your_domain
+e_mail: your_email_address

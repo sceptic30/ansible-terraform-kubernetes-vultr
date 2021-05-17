@@ -1,0 +1,132 @@
+---
+- hosts: kubernetes-master
+  vars_files:
+    - vars.yaml
+  become: true
+  become_user: "{{ user_name }}"
+  become_method: sudo
+
+  tasks:
+  - name: Installing Metal-LB Loadbalancer
+    shell:
+      cmd: |
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.9.6/manifests/namespace.yaml
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.9.6/manifests/metallb.yaml
+        kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
+
+  - name: Nginx Ingress Controller Installation
+    shell:
+      cmd: |
+        cd ~/
+        git clone -b release-1.7 https://github.com/sceptic30/kubernetes-ingress.git
+        cd kubernetes-ingress/deployments
+        kubectl apply -f common/ns-and-sa.yaml
+        kubectl apply -f rbac/rbac.yaml
+        kubectl apply -f common/default-server-secret.yaml
+        kubectl apply -f common/nginx-config.yaml
+        kubectl apply -f common/vs-definition.yaml
+        kubectl apply -f common/vsr-definition.yaml
+        kubectl apply -f common/ts-definition.yaml
+        kubectl apply -f common/gc-definition.yaml
+        kubectl apply -f common/global-configuration.yaml
+        kubectl apply -f deployment/nginx-ingress.yaml
+        kubectl apply -f service/loadbalancer.yaml
+
+  - name: Downloading & Installing Prometheus, Grafana, and AlertManager
+    shell:
+      cmd: |
+        cd ~/
+        git clone https://github.com/sceptic30/kube-prometheus.git
+        cd kube-prometheus
+        kubectl create -f manifests/setup
+        kubectl create -f manifests/
+
+  - name: Creating Cert Manager
+    command: kubectl apply --validate=false -f https://raw.githubusercontent.com/sceptic30/kubernetes-cert-manager/master/cert-manager-v0.15.1.yaml
+
+  - name: Kubernetes Dashboard Installation
+    command: kubectl apply -f https://raw.githubusercontent.com/sceptic30/kubernetes-dashboard/master/install.yaml
+
+  - name: Jenkins Installation
+    command: kubectl apply -f https://raw.githubusercontent.com/sceptic30/kubernetes-jenkins-auto-install/master/jenkins.yaml
+
+  - name: Creating Metal-LB Config
+    copy:
+      src: ../metallb/
+      dest: /home/{{ user_name }}/
+      owner: "{{ user_name }}"
+      group: "{{ user_name }}"
+      mode: '0644'
+# after installation finish, login to your master node as the created user, execute kubectl edit configmap -n kube-system kube-proxy, and make strictARP: true 
+
+  - name: Creating Ingress Resources
+    template:
+      src: ../ingress/{{ item.src }}
+      dest: ~/{{item.dest}}
+      owner: "{{ user_name }}"
+      group: "{{ user_name }}"
+      mode: '0644'
+    with_items:
+      - { src: 'alertmanager-ingress.yaml.j2', dest: 'alertmanager-ingress.yaml' }
+      - { src: 'alertmanager-tls-ingress.yaml.j2', dest: 'alertmanager-tls-ingress.yaml' }
+      - { src: 'grafana-ingress.yaml.j2', dest: 'grafana-ingress.yaml' }
+      - { src: 'grafana-tls-ingress.yaml.j2', dest: 'grafana-tls-ingress.yaml' }
+      - { src: 'jenkins-ingress.yaml.j2', dest: 'jenkins-ingress.yaml' }
+      - { src: 'jenkins-tls-ingress.yaml.j2', dest: 'jenkins-tls-ingress.yaml' }
+      - { src: 'prometheus-ingress.yaml.j2', dest: 'prometheus-ingress.yaml' }
+      - { src: 'prometheus-tls-ingress.yaml.j2', dest: 'prometheus-tls-ingress.yaml' }
+
+  - name: Creating LetsEncypt Production And Staging Issuer configs
+    template:
+      src: ../letsencrypt/{{ item.src }}
+      dest: ~/{{item.dest}}
+      owner: "{{ user_name }}"
+      group: "{{ user_name }}"
+      mode: '0644'
+    with_items:
+      - { src: 'prod-issuer.yaml.j2', dest: 'prod-issuer.yaml' }
+      - { src: 'staging-issuer.yaml.j2', dest: 'staging-issuer.yaml' }
+
+  - name: Applying Ingress Controller Resources
+    become: true
+    become_user: "{{ user_name }}"
+    become_method: sudo
+    shell:
+      cmd: |
+        sleep 5
+        cd ~/
+        kubectl apply -f jenkins-ingress.yaml
+        echo "Waiting 10 sec..."
+        sleep 10 
+        kubectl apply -f prometheus-ingress.yaml
+        echo "Waiting 10 sec..."
+        sleep 10
+        kubectl apply -f grafana-ingress.yaml
+        echo "Waiting 10 sec..."
+        sleep 10
+        kubectl apply -f alertmanager-ingress.yaml
+        sleep 10
+
+  - name: Applying Cluster Issuer Configs
+    become: true
+    become_user: "{{ user_name }}"
+    become_method: sudo
+    shell:
+      cmd: |
+        cd ~/
+        sleep 5
+        kubectl apply -f staging-issuer.yaml
+        sleep 5
+        kubectl apply -f prod-issuer.yaml
+
+  - name: Configuring Metal-LB LoadBalancer
+    become: true
+    become_user: "{{ user_name }}"
+    become_method: sudo
+    shell:
+      cmd: |
+        cd ~/
+        kubectl apply -f metal-lb.yaml
+        kubectl get configmap kube-proxy -n kube-system -o yaml | \
+        sed -e "s/strictARP: false/strictARP: true/" | \
+        kubectl apply -f - -n kube-system

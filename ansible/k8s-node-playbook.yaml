@@ -1,0 +1,112 @@
+---
+- hosts: kubernetes-nodes
+  vars_files:
+    - vars.yaml
+  become: true
+
+  tasks:
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add apt repository for stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+      state: present
+
+  - name: Install docker and its dependecies
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: Create a login user
+    user:
+     name: "{{ user_name }}"
+     password: "{{ user_password }}"
+     groups:
+      - docker
+      - sudo
+     state: present
+     shell: /bin/bash       # Defaults to /bin/bash
+     system: no             # Defaults to no
+     createhome: yes        # Defaults to yes
+     home: /home/{{ user_name }}  # Defaults to /home/<username>
+
+  - name: Enabling K8s to see bridged traffic
+    shell:
+      cmd: |
+        cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+        net.bridge.bridge-nf-call-ip6tables=1
+        net.bridge.bridge-nf-call-iptables=1
+        EOF
+        sysctl --system
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubernetes binaries
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet 
+        - kubeadm 
+        - kubectl
+
+  - name: Copy the join command to server location
+    copy:
+      src: "cluster_join_command" 
+      dest: /tmp/cluster_join_command.sh
+      mode: 0777
+    become: false
+
+  - name: Join the node to cluster
+    command: sh /tmp/cluster_join_command.sh
+
+  handlers:
+    - name: docker status
+      service: name=docker state=started
